@@ -20,3 +20,5 @@ output.json
 *.zip
 .claude/
 *.tsbuildinfo
+submission/submission.csv
+submission/eval_report.csv
