@@ -1,0 +1,9 @@
+services:
+  assistant:
+    build: .
+    env_file: .env
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data:ro
+    restart: unless-stopped
