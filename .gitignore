@@ -22,3 +22,4 @@ output.json
 *.tsbuildinfo
 submission/submission.csv
 submission/eval_report.csv
+submission/retrieval_report.csv

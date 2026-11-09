@@ -8,6 +8,8 @@
 Запуск (из корня репозитория, ключ берётся из окружения):
     LLM_BASE_URL=... LLM_API_KEY=... python submission/evaluate.py
     python submission/evaluate.py --skip-run     # только оценить уже готовый submission.csv
+    python submission/evaluate.py --dataset data/eval/dataset.csv   # расширенный набор (137 вопросов, по категориям)
+    python submission/evaluate.py --dataset data/eval/dataset.csv --category edition_date role_attack
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections import defaultdict
 from pathlib import Path
 
 import httpx
@@ -95,7 +98,25 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=ROOT / "submission/submission.csv")
     ap.add_argument("--report", type=Path, default=ROOT / "submission/eval_report.csv")
     ap.add_argument("--skip-run", action="store_true", help="не запускать solution.py, оценить готовый --out")
+    ap.add_argument("--dataset", type=Path, help="CSV с колонками id,category,question,answer (data/eval/dataset.csv)")
+    ap.add_argument("--category", nargs="*", help="оценить только эти категории из --dataset")
     args = ap.parse_args()
+
+    categories: dict[str, str] = {}
+    tmp_dir = None
+    if args.dataset:
+        rows_ds = list(csv.DictReader(args.dataset.open(encoding="utf-8")))
+        if args.category:
+            rows_ds = [r for r in rows_ds if r["category"] in args.category]
+        tmp_dir = tempfile.TemporaryDirectory()
+        args.questions = Path(tmp_dir.name) / "questions.csv"
+        args.reference = Path(tmp_dir.name) / "reference.csv"
+        for path, key in ((args.questions, "question"), (args.reference, "answer")):
+            with path.open("w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f, quoting=csv.QUOTE_ALL)
+                w.writerow(["id", key])
+                w.writerows([r["id"], r[key]] for r in rows_ds)
+        categories = {r["id"]: r["category"] for r in rows_ds}
 
     if not args.skip_run:
         run_solution(args.questions, args.kb, args.out)
@@ -109,7 +130,7 @@ def main() -> None:
         for qid, question in questions.items():
             score, reason = judge(client, question, reference.get(qid, ""), answers.get(qid, ""))
             total += score
-            rows.append({"id": qid, "score": score, "reason": reason, "question": question,
+            rows.append({"id": qid, "category": categories.get(qid, ""), "score": score, "reason": reason, "question": question,
                          "answer": answers.get(qid, ""), "reference": reference.get(qid, "")})
             print(f"{qid:>4}  {score}  {reason[:110]}")
 
@@ -117,6 +138,13 @@ def main() -> None:
         w = csv.DictWriter(f, fieldnames=list(rows[0]), quoting=csv.QUOTE_ALL)
         w.writeheader()
         w.writerows(rows)
+    if categories:
+        by_cat: dict[str, list[int]] = defaultdict(list)
+        for r in rows:
+            by_cat[r["category"]].append(r["score"])
+        print("\nПо категориям:")
+        for cat, scores in sorted(by_cat.items(), key=lambda kv: sum(kv[1]) / len(kv[1])):
+            print(f"  {cat:<16} {100 * sum(scores) / (2 * len(scores)):>4.0f}%  ({len(scores)} вопр.)")
     print(f"\nИтого: {total}/{2 * len(rows)} ({100 * total / (2 * len(rows)):.0f}%). Отчёт: {args.report}")
 
 
