@@ -8,7 +8,7 @@
 Запуск (из корня репозитория, ключ берётся из окружения):
     LLM_BASE_URL=... LLM_API_KEY=... python submission/evaluate.py
     python submission/evaluate.py --skip-run     # только оценить уже готовый submission.csv
-    python submission/evaluate.py --dataset data/eval/dataset.csv   # расширенный набор (137 вопросов, по категориям)
+    python submission/evaluate.py --dataset data/eval/dataset.csv --split dev   # расширенный набор, по категориям
     python submission/evaluate.py --dataset data/eval/dataset.csv --category edition_date role_attack
 """
 
@@ -100,6 +100,7 @@ def main() -> None:
     ap.add_argument("--skip-run", action="store_true", help="не запускать solution.py, оценить готовый --out")
     ap.add_argument("--dataset", type=Path, help="CSV с колонками id,category,question,answer (data/eval/dataset.csv)")
     ap.add_argument("--category", nargs="*", help="оценить только эти категории из --dataset")
+    ap.add_argument("--split", choices=["dev", "test"], help="только dev (улучшаем) или test (проверяем, не подгоняем)")
     args = ap.parse_args()
 
     categories: dict[str, str] = {}
@@ -108,6 +109,8 @@ def main() -> None:
         rows_ds = list(csv.DictReader(args.dataset.open(encoding="utf-8")))
         if args.category:
             rows_ds = [r for r in rows_ds if r["category"] in args.category]
+        if args.split:
+            rows_ds = [r for r in rows_ds if r.get("split") == args.split]
         tmp_dir = tempfile.TemporaryDirectory()
         args.questions = Path(tmp_dir.name) / "questions.csv"
         args.reference = Path(tmp_dir.name) / "reference.csv"
