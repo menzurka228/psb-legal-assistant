@@ -1,10 +1,22 @@
 .env
+.DS_Store
+.idea/
+.vscode/
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+
+# go
+backend/bin/
+
+# python submission
 .venv/
 venv/
 __pycache__/
 *.pyc
-.DS_Store
-.idea/
-.vscode/
+submission/submission.zip
 output.json
 *.zip
+.claude/
+*.tsbuildinfo

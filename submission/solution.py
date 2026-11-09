@@ -14,7 +14,7 @@
 import json
 import sys
 
-from app.assistant import LegalAssistant
+from legal_assistant.assistant import LegalAssistant
 
 
 def main(inp: str, out: str) -> None:

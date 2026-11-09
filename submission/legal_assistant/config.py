@@ -2,9 +2,10 @@
 import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-
-KB_DIR = Path(os.getenv("KB_DIR", ROOT / "data" / "kb"))
+_HERE = Path(__file__).resolve().parent
+# В ZIP-сабмите data/ лежит рядом с solution.py, в репозитории — в корне проекта
+_DEFAULT_KB = next((p for p in (_HERE.parent / "data" / "kb", _HERE.parent.parent / "data" / "kb") if p.exists()), _HERE.parent / "data" / "kb")
+KB_DIR = Path(os.getenv("KB_DIR", _DEFAULT_KB))
 
 # OpenAI-совместимый API (на платформе хакатона — DeepSeek V4.1 Flash через API организаторов)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")

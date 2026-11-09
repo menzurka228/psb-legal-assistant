@@ -1,4 +1,4 @@
-from app.kb import KnowledgeBase
+from legal_assistant.kb import KnowledgeBase
 
 
 def test_search_finds_article(tmp_path):

@@ -14,16 +14,14 @@ from rank_bm25 import BM25Okapi
 from . import config
 
 TOKEN_RE = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
-# Начало нового положения: «Статья 5», «5.1.», «п. 3», «Глава 2», «Раздел 1»
-HEADING_RE = re.compile(
-    r"^\s*(Статья\s+\d+[\.\d]*|Глава\s+\d+|Раздел\s+[\dIVX]+|\d+(\.\d+)*\.\s|п\.\s*\d+)",
-    re.IGNORECASE,
-)
+# Крупные структурные единицы (родитель для пунктов) и пункты внутри статьи
+SECTION_RE = re.compile(r"^\s*(Статья\s+\d+[\.\d]*|Глава\s+\d+|Раздел\s+[\dIVX]+)", re.IGNORECASE)
+POINT_RE = re.compile(r"^\s*(\d+(\.\d+)*\.\s|п\.\s*\d+)", re.IGNORECASE)
 
 
 def tokenize(text: str) -> list[str]:
-    # Простейшая нормализация: нижний регистр + обрезка окончаний до 6 символов
-    return [t.lower()[:6] for t in TOKEN_RE.findall(text)]
+    # Простейшая нормализация: нижний регистр + обрезка окончаний до 5 символов
+    return [t.lower()[:5] for t in TOKEN_RE.findall(text)]
 
 
 @dataclass
@@ -56,6 +54,7 @@ def split_into_chunks(doc_name: str, text: str, max_chars: int = 1500) -> list[C
     title, buf = "Начало документа", []
 
     def flush():
+        nonlocal buf
         body = "\n".join(buf).strip()
         if body:
             for i in range(0, len(body), max_chars):
@@ -63,11 +62,17 @@ def split_into_chunks(doc_name: str, text: str, max_chars: int = 1500) -> list[C
                     Chunk(id=f"{doc_name}#{len(chunks)}", doc=doc_name, title=title, text=body[i : i + max_chars])
                 )
 
+    section = ""  # текущая статья/глава — добавляется к заголовку пункта
     for line in text.splitlines():
-        m = HEADING_RE.match(line)
-        if m:
+        trimmed = line.strip()
+        if SECTION_RE.match(line):
             flush()
-            title, buf = line.strip()[:120], []
+            section = trimmed[:120]
+            title, buf = section, []
+        elif POINT_RE.match(line):
+            flush()
+            point = trimmed[:40] if trimmed.lower().startswith("п.") else "п. " + trimmed.split()[0].rstrip(".")
+            title, buf = (f"{section} › {point}" if section else point), []
         buf.append(line)
     flush()
     return chunks
