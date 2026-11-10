@@ -10,9 +10,10 @@ interface Turn {
 }
 
 const EXAMPLES = [
-  "Какие документы нужны для проверки правоспособности компании перед выдачей кредита?",
-  "Какая ставка НДС применяется к договору с контрагентом?",
-  "Какой порядок согласования договора?",
+  "Какой гарантийный срок по договору с «Альфа-Трейд»?",
+  "Договор на 12 млн рублей заключали в августе 2024 года. Нужно ли было одобрение генерального директора?",
+  "Какой МРОТ был в 2024 году?",
+  "Как согласовать договор поставки с иностранной компанией на 5 млн рублей?",
 ];
 
 export default function App() {
@@ -95,7 +96,7 @@ export default function App() {
                   className={`msg bot ${t.response.refused ? "refused" : ""} ${active === i ? "active" : ""}`}
                   onClick={() => setActive(i)}
                 >
-                  {t.response.refused && <span className="badge">Недостаточно данных</span>}
+                  {t.response.refused && <span className="badge">Без ссылок на базу</span>}
                   <Answer
                     text={t.response.answer}
                     onCite={(n) => { setActive(i); setHighlight(n); }}
@@ -130,7 +131,7 @@ export default function App() {
             <article key={s.id} id={`src-${s.n}`} className={`source ${highlight === s.n ? "hl" : ""}`}>
               <div className="source-head">
                 <span className="num">[{s.n}]</span>
-                <span className="doc">{s.doc}</span>
+                <span className="doc">{s.docTitle}</span>
               </div>
               <div className="title">{s.title}</div>
               <p>{s.text}</p>

@@ -9,6 +9,7 @@ export interface Source {
   n: number;
   id: string;
   doc: string;
+  docTitle: string;
   title: string;
   text: string;
   score: number;
@@ -35,5 +36,5 @@ export const api = {
       body: JSON.stringify({ question, history }),
     }),
   document: (name: string) =>
-    request<{ name: string; text: string }>(`/api/documents/${encodeURIComponent(name)}`),
+    request<{ name: string; title: string; text: string }>(`/api/documents/${encodeURIComponent(name)}`),
 };

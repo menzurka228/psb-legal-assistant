@@ -27,7 +27,7 @@ export function DocumentViewer({ source, onClose }: { source: Source; onClose: (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <header>
-          <h3>{source.doc}</h3>
+          <h3>{source.docTitle}</h3>
           <button className="ghost" onClick={onClose}>Закрыть</button>
         </header>
         <div className="doc-body">

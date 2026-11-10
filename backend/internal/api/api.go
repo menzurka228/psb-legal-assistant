@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/menzurka228/psb-legal-assistant/backend/internal/assistant"
@@ -38,7 +37,8 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok", "documents": len(s.KB.Documents), "chunks": len(s.KB.Chunks),
+		"status": "ok", "documents": len(s.KB.Docs), "company": len(s.KB.Company), "laws": len(s.KB.Laws),
+		"chunks": len(s.KB.CompanyChunks) + len(s.KB.LawChunks),
 	})
 }
 
@@ -63,22 +63,16 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listDocuments(w http.ResponseWriter, _ *http.Request) {
-	names := make([]string, 0, len(s.KB.Documents))
-	for n := range s.KB.Documents {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	writeJSON(w, http.StatusOK, names)
+	writeJSON(w, http.StatusOK, s.KB.Docs) // name, kind, title
 }
 
 func (s *Server) getDocument(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	text, ok := s.KB.Documents[name]
+	d, ok := s.KB.ByName[r.PathValue("name")]
 	if !ok {
 		writeError(w, http.StatusNotFound, "документ не найден")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"name": name, "text": text})
+	writeJSON(w, http.StatusOK, map[string]string{"name": d.Name, "title": d.Title, "kind": d.Kind, "text": d.Text})
 }
 
 // spa раздаёт статику фронтенда, а неизвестные пути отдаёт index.html.
