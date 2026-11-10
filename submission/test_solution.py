@@ -110,3 +110,18 @@ def test_law_timeline_marks_future_and_skips_old():
                      "Пункт 3 изменен с 1 марта 2027 г. - Федеральный закон\nПункт 4 изменен с 1 января 2010 г.")
     tl = s.law_timeline(law, dt.date(2026, 11, 9))
     assert tl == ["Пункт 2 изменен — с 01.01.2026 (действует)", "Пункт 3 изменен — с 01.03.2027 (вступит в силу в будущем)"]
+
+
+def test_zip_names_without_utf8_flag():
+    """Архив с Mac/Linux (UTF-8 без флага) и с Windows (cp866): кириллица в именах восстанавливается."""
+    import zipfile
+    name = "законы__ТК_ст70.txt"
+    for raw in (name.encode("utf-8"), name.encode("cp866")):
+        info = zipfile.ZipInfo(raw.decode("cp437"))  # так Python читает имя без флага 0x800
+        info.flag_bits = 0
+        assert s.zip_name(info) == name
+
+
+def test_law_detected_by_content_when_name_is_unhelpful():
+    d = s.make_document("doc_17.txt", "Источник: Статья 99. ТК РФ Сверхурочная работа\nТекст статьи")
+    assert d.kind == "law" and d.title.startswith("Статья 99")

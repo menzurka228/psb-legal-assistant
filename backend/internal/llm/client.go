@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/menzurka228/psb-legal-assistant/backend/internal/kb"
@@ -36,6 +37,73 @@ type Client struct {
 	EmbedModel  string
 	RerankKey   string
 	RerankModel string
+
+	mu     sync.Mutex
+	chosen map[string]string // путь API → подошедшее имя модели
+	dead   map[string]bool   // путь API → ни одно имя не подошло
+}
+
+// Варианты имён моделей: точные идентификаторы в API организаторов не опубликованы,
+// поэтому перебираем типичные и запоминаем рабочее (как ModelPicker в solution.py).
+func candidates(primary string, variants ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range append([]string{primary}, variants...) {
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+// postModel вызывает path, подбирая имя модели среди names при ответах 400/404/422.
+func (c *Client) postModel(ctx context.Context, path, key string, names []string, payload map[string]any, out any) error {
+	c.mu.Lock()
+	if c.chosen == nil {
+		c.chosen, c.dead = map[string]string{}, map[string]bool{}
+	}
+	if c.dead[path] {
+		c.mu.Unlock()
+		return fmt.Errorf("%s: модель недоступна", path)
+	}
+	if name, ok := c.chosen[path]; ok { // имя уже подобрано — запросы идут параллельно
+		c.mu.Unlock()
+		payload["model"] = name
+		return c.post(ctx, path, key, payload, out)
+	}
+	defer c.mu.Unlock() // подбор имени — один раз, остальные запросы ждут его окончания
+	var last error
+	for _, name := range names {
+		payload["model"] = name
+		err := c.post(ctx, path, key, payload, out)
+		if err == nil {
+			c.chosen[path] = name
+			return nil
+		}
+		last = err
+		var se *statusError
+		if !asStatus(err, &se) || (se.code != 400 && se.code != 404 && se.code != 422) {
+			return err
+		}
+	}
+	c.dead[path] = true
+	return fmt.Errorf("%s: ни одно имя модели не подошло: %w", path, last)
+}
+
+func asStatus(err error, target **statusError) bool {
+	se, ok := err.(*statusError)
+	if ok {
+		*target = se
+	}
+	return ok
 }
 
 func New(baseURL, apiKey, model string, temperature float64, maxTokens int, timeout time.Duration) *Client {
@@ -62,7 +130,7 @@ func (c *Client) post(ctx context.Context, path, key string, payload any, out an
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s вернул %d: %s", path, resp.StatusCode, truncate(string(raw), 300))
+		return &statusError{code: resp.StatusCode, msg: fmt.Sprintf("%s вернул %d: %s", path, resp.StatusCode, truncate(string(raw), 300))}
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		return fmt.Errorf("разбор ответа %s: %w", path, err)
@@ -108,7 +176,8 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float64, error)
 			Embedding []float64 `json:"embedding"`
 		} `json:"data"`
 	}
-	err := c.post(ctx, "/embeddings", c.EmbedKey, map[string]any{"model": c.EmbedModel, "input": texts, "encoding_format": "float"}, &out)
+	names := candidates(c.EmbedModel, "baai/bge-m3", "BAAI/bge-m3", "bge-m3")
+	err := c.postModel(ctx, "/embeddings", c.EmbedKey, names, map[string]any{"input": texts, "encoding_format": "float"}, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +209,8 @@ func (c *Client) Rerank(ctx context.Context, query string, docs []string, topN i
 			Index int `json:"index"`
 		} `json:"data"`
 	}
-	err := c.post(ctx, "/rerank", c.RerankKey, map[string]any{"model": c.RerankModel, "query": query, "documents": docs, "top_n": min(topN, len(docs))}, &out)
+	names := candidates(c.RerankModel, "qwen/qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", "qwen3-reranker-8b", "Qwen3-Reranker-8B")
+	err := c.postModel(ctx, "/rerank", c.RerankKey, names, map[string]any{"query": query, "documents": docs, "top_n": min(topN, len(docs))}, &out)
 	if err != nil {
 		return nil, err
 	}

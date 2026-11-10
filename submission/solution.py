@@ -22,10 +22,13 @@ import math
 import os
 import re
 import sys
+import threading
 import time
+import unicodedata
 import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -56,11 +59,20 @@ RERANK_KEY = env("RERANKER_API_KEY") or LLM_KEY
 
 LLM_MODEL = env("LLM_MODEL") or env("GEN_MODEL") or env("OPENAI_MODEL", "deepseek/deepseek-v4.1-flash")
 EMB_MODEL = env("EMB_MODEL", "baai/bge-m3")
-RERANKER_MODEL = env("RERANKER_MODEL", "cohere/rerank-5-fast")
+# По правилам реранжирование — Qwen3 Reranker 8B. Точный идентификатор в API организаторов не опубликован,
+# поэтому, если платформа не передала RERANKER_MODEL, перебираем типичные варианты имени и запоминаем рабочий.
+RERANKER_MODEL = env("RERANKER_MODEL", "qwen/qwen3-reranker-8b")
+RERANKER_CANDIDATES = list(dict.fromkeys(
+    [RERANKER_MODEL, "qwen/qwen3-reranker-8b", "Qwen/Qwen3-Reranker-8B", "qwen3-reranker-8b", "Qwen3-Reranker-8B"]))
+EMB_CANDIDATES = list(dict.fromkeys([EMB_MODEL, "baai/bge-m3", "BAAI/bge-m3", "bge-m3"]))
 
 TEMPERATURE = float(env("TEMPERATURE", "0.0") or 0)
 MAX_TOKENS = env_int("MAX_TOKENS", 1200)
-MAX_WORKERS = env_int("MAX_WORKERS", 4)
+MAX_WORKERS = env_int("MAX_WORKERS", 6)
+# Лимит платформы — 20 минут на сабмит. Оставляем запас: к этому сроку пишем submission.csv в любом случае.
+TIME_BUDGET_SEC = env_int("TIME_BUDGET_SEC", 17 * 60)
+REQUEST_TIMEOUT_SEC = env_int("REQUEST_TIMEOUT_SEC", 90)
+STARTED_AT = time.time()
 LAW_CANDIDATES = env_int("LAW_CANDIDATES", 30)  # сколько фрагментов законов отдаём реранкеру
 LAW_TOP_N = env_int("LAW_TOP_N", 8)  # сколько фрагментов законов попадает в промпт
 CHUNK_CHARS = env_int("CHUNK_CHARS", 1400)
@@ -133,7 +145,10 @@ def make_document(filename: str, text: str) -> Document:
     category, _, title = stem.partition("__")
     if not title:
         category, title = "", stem
-    is_law = "закон" in category.lower() or bool(re.search(r"(ФЗ|НК|ТК|КоАП|ГК)_", stem))
+    # Закон — по имени файла или, если имя не помогло, по содержимому («Источник: Статья …» в начале)
+    head = text.lstrip()[:300].lower()
+    is_law = ("закон" in category.lower() or bool(re.search(r"(ФЗ|НК|ТК|КоАП|ГК)_", stem))
+              or (head.startswith("источник:") and "статья" in head))
     text = sanitize(stem, text.replace("\r\n", "\n").strip())
     if is_law:
         first = text.splitlines()[0] if text else ""
@@ -155,15 +170,34 @@ def find_kb() -> Path:
     raise FileNotFoundError("Не найдена база знаний: kb.zip или папка kb/")
 
 
+def zip_name(info: zipfile.ZipInfo) -> str:
+    """Имя файла в ZIP. Без флага UTF-8 Python читает имя как cp437 — восстанавливаем кириллицу
+    (архивы с Mac/Linux пишут UTF-8 без флага, с Windows — cp866)."""
+    name = info.filename
+    if info.flag_bits & 0x800:
+        return unicodedata.normalize("NFC", name)
+    try:
+        raw = name.encode("cp437")
+    except UnicodeEncodeError:
+        return unicodedata.normalize("NFC", name)
+    for enc in ("utf-8", "cp866"):
+        try:
+            return unicodedata.normalize("NFC", raw.decode(enc))
+        except UnicodeDecodeError:
+            continue
+    return name
+
+
 def load_documents(path: Path) -> list[Document]:
     raw_files: list[tuple[str, bytes]] = []
     if path.is_dir():
         raw_files = [(str(p.relative_to(path)), p.read_bytes()) for p in sorted(path.rglob("*")) if p.is_file()]
     else:
         with zipfile.ZipFile(path) as archive:
-            for name in sorted(archive.namelist()):
+            for info in sorted(archive.infolist(), key=lambda i: i.filename):
+                name = zip_name(info)
                 if not name.endswith("/") and not name.startswith("__MACOSX/"):
-                    raw_files.append((name, archive.read(name)))
+                    raw_files.append((name, archive.read(info)))
     docs = []
     for name, raw in raw_files:
         suffix = Path(name).suffix.lower()
@@ -447,19 +481,60 @@ class BM25:
         return out
 
 
+def time_left() -> float:
+    return TIME_BUDGET_SEC - (time.time() - STARTED_AT)
+
+
 def post(client: httpx.Client, path: str, key: str, payload: dict) -> dict:
-    if not key:
-        raise ValueError("Не задан API-ключ")
-    resp = client.post(API_BASE + path, headers={"Authorization": "Bearer " + key}, json=payload)
+    # Ключ на платформе подставляют организаторы; если его нет в окружении — шлём запрос без авторизации.
+    headers = {"Authorization": "Bearer " + key} if key else {}
+    resp = client.post(API_BASE + path, headers=headers, json=payload)
     resp.raise_for_status()
     return resp.json()
+
+
+class ModelPicker:
+    """Перебирает варианты имени модели, пока API не примет одно; рабочее запоминает для всех потоков."""
+
+    def __init__(self, kind: str, candidates: list[str]):
+        self.kind, self.candidates = kind, candidates
+        self.chosen: str | None = None
+        self.disabled = False
+        self.lock = threading.Lock()
+
+    def call(self, client: httpx.Client, path: str, key: str, payload: dict) -> dict:
+        if self.disabled:
+            raise RuntimeError(f"{self.kind}: модель недоступна")
+        if self.chosen:
+            return post(client, path, key, {**payload, "model": self.chosen})
+        with self.lock:  # подбор имени — один раз, остальные потоки ждут
+            if self.chosen:
+                return post(client, path, key, {**payload, "model": self.chosen})
+            last: Exception | None = None
+            for name in self.candidates:
+                try:
+                    data = post(client, path, key, {**payload, "model": name})
+                    self.chosen = name
+                    log(f"{self.kind}: используется модель {name}")
+                    return data
+                except httpx.HTTPStatusError as exc:
+                    last = exc
+                    if exc.response.status_code not in (400, 404, 422):
+                        raise  # не «нет такой модели», а сбой сервиса — не перебираем
+                    log(f"{self.kind}: модель {name} не принята ({exc.response.status_code})")
+            self.disabled = True
+            raise RuntimeError(f"{self.kind}: ни одно имя модели не подошло: {last}")
+
+
+EMBEDDER = ModelPicker("Эмбеддинги", EMB_CANDIDATES)
+RERANKER = ModelPicker("Реранкер", RERANKER_CANDIDATES)
 
 
 def embed(client: httpx.Client, texts: list[str], batch: int = 32) -> list[list[float]]:
     vectors: list[list[float]] = []
     for i in range(0, len(texts), batch):
         part = texts[i : i + batch]
-        data = post(client, "/embeddings", EMBED_KEY, {"model": EMB_MODEL, "input": part, "encoding_format": "float"})
+        data = EMBEDDER.call(client, "/embeddings", EMBED_KEY, {"input": part, "encoding_format": "float"})
         got: list[list[float] | None] = [None] * len(part)
         for pos, item in enumerate(data["data"]):
             vec = [float(x) for x in item["embedding"]]
@@ -472,8 +547,8 @@ def embed(client: httpx.Client, texts: list[str], batch: int = 32) -> list[list[
 
 
 def rerank(client: httpx.Client, query: str, texts: list[str], top_n: int) -> list[int]:
-    data = post(client, "/rerank", RERANK_KEY, {
-        "model": RERANKER_MODEL, "query": query, "documents": texts, "top_n": min(top_n, len(texts)),
+    data = RERANKER.call(client, "/rerank", RERANK_KEY, {
+        "query": query, "documents": texts, "top_n": min(top_n, len(texts)),
     })
     items = data.get("results", data.get("data", []))
     return [int(it["index"]) for it in items if 0 <= int(it["index"]) < len(texts)]
@@ -658,7 +733,7 @@ class Assistant:
         system = {"role": "system", "content": SYSTEM_PROMPT.format(today=TODAY)}
         draft = self.chat(client, [system, *history, final])
 
-        if SELF_CHECK:
+        if SELF_CHECK and time_left() > 120:  # при нехватке времени самопроверку пропускаем
             dialog = "\n".join(f"{'Пользователь' if m['role'] == 'user' else 'Ассистент'}: {m['content']}" for m in messages)
             check = [
                 system,
@@ -711,35 +786,45 @@ def main() -> None:
     if len(sys.argv) > 2 and sys.argv[1] == "--show-context":
         show_context(sys.argv[2])
         return
-    if not API_BASE or not LLM_KEY:
-        raise SystemExit("Нужны переменные LLM_BASE_URL и LLM_API_KEY")
+    if not API_BASE:
+        raise SystemExit("Нужна переменная LLM_BASE_URL (адрес API организаторов)")
     questions = load_questions(find_questions())
     assistant = Assistant(load_documents(find_kb()))
-    log(f"Вопросов: {len(questions)}; модель: {LLM_MODEL}; самопроверка: {SELF_CHECK}")
+    log(f"API: {API_BASE}; ключ {'задан' if LLM_KEY else 'не задан'}; модель: {LLM_MODEL}; "
+        f"вопросов: {len(questions)}; потоков: {MAX_WORKERS}; самопроверка: {SELF_CHECK}; бюджет: {TIME_BUDGET_SEC} с")
 
-    with httpx.Client(timeout=120.0) as client:
+    with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:
         assistant.prepare(client)
 
     def work(i: int, question: str) -> tuple[int, str]:
+        if time_left() < 30:
+            return i, FALLBACK  # времени нет — не начинаем новый вопрос
         try:
-            with httpx.Client(timeout=120.0) as client:
+            with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as client:
                 return i, assistant.answer(client, question)
         except Exception as exc:  # noqa: BLE001
             log(f"Вопрос {questions[i][0]}: {type(exc).__name__}: {exc}")
             return i, FALLBACK
 
     answers = [FALLBACK] * len(questions)
-    started = time.time()
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = [pool.submit(work, i, q) for i, (_, q) in enumerate(questions)]
-        for done, fut in enumerate(as_completed(futures), 1):
+    done = 0
+    pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    futures = [pool.submit(work, i, q) for i, (_, q) in enumerate(questions)]
+    try:
+        for fut in as_completed(futures, timeout=max(time_left(), 1)):
             i, ans = fut.result()
             answers[i] = ans
+            done += 1
             if done % 10 == 0 or done == len(questions):
-                log(f"Обработано {done}/{len(questions)} за {time.time() - started:.0f} с")
+                log(f"Обработано {done}/{len(questions)} за {time.time() - STARTED_AT:.0f} с")
+    except FuturesTimeout:
+        log(f"Бюджет времени исчерпан: готово {done}/{len(questions)}, остальные — заглушка")
 
     write_answers(OUTPUT, [(qid, answers[i]) for i, (qid, _) in enumerate(questions)])
-    print(f"Создан {OUTPUT}: {len(questions)} ответов", flush=True)
+    print(f"Создан {OUTPUT}: {len(questions)} ответов за {time.time() - STARTED_AT:.0f} с", flush=True)
+    if done < len(questions):
+        os._exit(0)  # не ждём зависшие запросы — файл уже записан
+    pool.shutdown(wait=True)
 
 
 if __name__ == "__main__":

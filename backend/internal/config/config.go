@@ -48,7 +48,7 @@ func Load() Config {
 		EmbedKey:      first(os.Getenv("EMBEDDER_API_KEY"), key),
 		EmbedModel:    env("EMB_MODEL", "baai/bge-m3"),
 		RerankKey:     first(os.Getenv("RERANKER_API_KEY"), key),
-		RerankModel:   env("RERANKER_MODEL", "cohere/rerank-5-fast"),
+		RerankModel:   env("RERANKER_MODEL", "qwen/qwen3-reranker-8b"),
 		UseEmbeddings: env("USE_EMBEDDINGS", "1") == "1",
 
 		LawCandidates:    int(envFloat("LAW_CANDIDATES", 30)),
