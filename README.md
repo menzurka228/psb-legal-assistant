@@ -64,7 +64,7 @@ docker compose up --build
 |---|---|---|
 | `LLM_BASE_URL`, `LLM_API_KEY` | OpenAI-совместимый API (не коммитить ключ!) | — |
 | `LLM_MODEL` | модель генерации | `deepseek/deepseek-v4.1-flash` |
-| `EMB_MODEL`, `RERANKER_MODEL` | эмбеддинги и реранкер | `baai/bge-m3`, `cohere/rerank-5-fast` |
+| `EMB_MODEL`, `RERANKER_MODEL` | эмбеддинги и реранкер | `baai/bge-m3`, `qwen/qwen3-reranker-8b` |
 | `USE_EMBEDDINGS` | `0` — только BM25 | `1` |
 | `LAW_TOP_N` | фрагментов законов в промпт | `8` |
 | `SELF_CHECK` | самопроверка ответа вторым вызовом | `0` |

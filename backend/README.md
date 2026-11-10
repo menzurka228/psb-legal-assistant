@@ -66,7 +66,7 @@ backend/
 | `LLM_BASE_URL`, `LLM_API_KEY` | — | OpenAI-совместимый API (на платформе — API организаторов) |
 | `LLM_MODEL` | `deepseek/deepseek-v4.1-flash` | генерация |
 | `EMB_MODEL`, `EMBEDDER_API_KEY` | `baai/bge-m3`, ключ LLM | эмбеддинги |
-| `RERANKER_MODEL`, `RERANKER_API_KEY` | `cohere/rerank-5-fast`, ключ LLM | реранкер (уточнить имя Qwen3 Reranker) |
+| `RERANKER_MODEL`, `RERANKER_API_KEY` | `qwen/qwen3-reranker-8b`, ключ LLM | Qwen3 Reranker 8B; при отказе API перебираются варианты имени |
 | `USE_EMBEDDINGS` | `1` | `0` — только BM25 |
 | `LAW_TOP_N` / `LAW_CANDIDATES` | 8 / 30 | фрагментов законов в промпт / в реранкер |
 | `COMPANY_FULL_LIMIT` | 60000 | порог «документы компании целиком» |
