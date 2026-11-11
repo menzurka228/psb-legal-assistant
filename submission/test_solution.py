@@ -178,3 +178,46 @@ def test_retry_policy():
     assert s.retry_delay(err(400), 0) is None
     assert s.retry_delay(err(429, {"retry-after": "7"}), 0) == 7.0
     assert s.retry_delay(err(503), 1) == 3.0
+
+
+def test_explicit_provision_is_pinned_even_when_article_already_matches(monkeypatch):
+    doc = _law("законы__НК_ст164", "Статья 164. НК РФ",
+               "1. Общая налоговая ставка.\n\n2. Льготная ставка на определённые товары.")
+    assistant = s.Assistant([doc])
+    distractor = s.Chunk(doc, "1. Общая налоговая ставка.", 0)
+    evidence = s.Chunk(doc, "2. Льготная ставка на определённые товары.", 1)
+    assistant.law_retriever = s.Retriever([distractor, evidence])
+    monkeypatch.setattr(s, "LAW_FULL_CHARS", 10)
+    monkeypatch.setattr(assistant.law_retriever, "search", lambda *args: [distractor])
+    hits = assistant.search_laws(None, s.parse_dialog("Какая ставка по п. 2 ст. 164 НК РФ?"))
+    assert hits == [evidence, distractor]
+
+
+def test_law_context_cap_prefers_highest_ranked_fragment():
+    doc = _law("законы__НК_ст164", "Статья 164. НК РФ", "x" * 1000)
+    first = s.Chunk(doc, "abcdefgh", 4)
+    second = s.Chunk(doc, "ijklmnop", 2)
+    assert s.expand_law_chunks([first, second], full_limit=40, total_limit=10) == [first]
+
+
+def test_retry_after_length_increases_token_limit(monkeypatch):
+    limits = []
+
+    def post(client, path, key, payload, timeout_cap=None):
+        limits.append(payload["max_tokens"])
+        return {"choices": [{"finish_reason": "length" if len(limits) == 1 else "stop",
+                             "message": {"content": "Ответ по базе."}}]}
+
+    monkeypatch.setattr(s, "MAX_TOKENS", 1200)
+    monkeypatch.setattr(s, "time_left", lambda: 300)
+    monkeypatch.setattr(s, "post", post)
+    assert s.Assistant([]).chat(None, []) == "Ответ по базе."
+    assert limits == [1200, 2400]
+
+
+def test_review_keeps_original_if_new_reference_is_unsupported(monkeypatch):
+    assistant = s.Assistant([])
+    draft = s.Draft("Какой срок?", [{"role": "user", "content": "Договор № П-17/2024"}],
+                    "Срок указан в договоре № П-17/2024.", [])
+    monkeypatch.setattr(assistant, "chat", lambda *a, **kw: "По договору № П-18/2024.")
+    assert assistant.review(None, draft) == draft.text
