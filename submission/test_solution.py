@@ -271,3 +271,29 @@ def test_review_receives_calculation_mismatch(monkeypatch):
         return "10 × 5 = 50 руб."
     monkeypatch.setattr(assistant, "chat", fix)
     assert assistant.review(None, draft) == "10 × 5 = 50 руб."
+
+
+def test_company_evidence_ranks_named_counterparty_and_keeps_verbatim_text():
+    a = s.Document("a", "company", "Договор Альфа-Трейд",
+                   "1. Гарантийные обязательства\n\n1.1. Срок гарантии составляет 24 месяца с даты поставки.")
+    b = s.Document("b", "company", "Договор Альфа-Трейдинг",
+                   "1. Гарантийные обязательства\n\n1.1. Срок гарантии указывается в гарантийном талоне.")
+    excerpts = s.CompanyEvidence([b, a]).find("Какой гарантийный срок у «Альфа-Трейд»?", "")
+    assert excerpts[0][0] is a
+    assert all(text in doc.text for doc, text in excerpts)
+
+
+def test_company_evidence_keeps_original_documents_and_adds_excerpts_at_end():
+    doc = s.Document("a", "company", "Регламент поставки",
+                     "1.1. Срок приёмки по качеству составляет пять рабочих дней.\n\n"
+                     "1.2. Другие обязательства проверяются по документам поставщика.")
+    context = s.Assistant([doc]).context(None, s.parse_dialog("Каков срок приёмки по качеству?"))
+    full, excerpts = context.split("## Выдержки из документов компании для этого вопроса")
+    assert doc.text in full
+    assert "1.1. Срок приёмки" in excerpts
+
+
+def test_company_excerpts_respect_budget():
+    doc = s.Document("a", "company", "Регламент поставки",
+                     "1.1. Срок приёмки по качеству составляет пять рабочих дней.")
+    assert s.CompanyEvidence([doc]).find("Срок приёмки", "", budget=20) == []
