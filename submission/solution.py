@@ -466,7 +466,11 @@ SYNONYMS = {
     "зарплат": "оплата труда",
     "сезонн": "сезонные работы срочный трудовой договор",
     "отозва": "отзыв согласия",
-    "утечк": "персональных данных нарушение",
+    "утечк": "персональных данных нарушение уведомление",
+    "рассыл": "обработка персональных данных согласие цель",
+    "телефон": "персональных данных обработка согласие",
+    "повторн": "аналогичное правонарушение отягчающее обстоятельство",
+    "штрафовали": "ранее привлекавшееся к ответственности отягчающее обстоятельство",
 }
 
 
@@ -698,6 +702,21 @@ def referenced_laws(question: str, laws: list[Document]) -> list[Document]:
     return out
 
 
+def diversify_law_hits(hits: list[Chunk], limit: int) -> list[Chunk]:
+    """Оставляем сильные совпадения, а последние места отдаём новым источникам."""
+    keep = max(1, limit - min(3, limit // 2))
+    selected = hits[:keep]
+    seen = {c.doc.name for c in selected}
+    deferred = []
+    for hit in hits[keep:]:
+        if len(selected) < limit and hit.doc.name not in seen:
+            selected.append(hit)
+            seen.add(hit.doc.name)
+        else:
+            deferred.append(hit)
+    return selected + deferred[:max(0, limit - len(selected))]
+
+
 def expand_law_chunks(chunks: list[Chunk], full_limit: int = LAW_FULL_CHARS,
                       total_limit: int = LAW_CONTEXT_CHARS) -> list[Chunk]:
     """Группирует найденные фрагменты по статьям (в порядке релевантности статьи).
@@ -727,23 +746,23 @@ def expand_law_chunks(chunks: list[Chunk], full_limit: int = LAW_FULL_CHARS,
 
 # ───────────────────────────── диалог и промпт ─────────────────────────────
 
-TURN_RE = re.compile(r"^(Пользователь|Ассистент|User|Assistant)\s*:\s*", re.IGNORECASE | re.MULTILINE)
+TURN_RE = re.compile(r"^(Пользователь|Ассистент|User|Assistant)[ \t]*:[ \t]*", re.IGNORECASE | re.MULTILINE)
 
 
 def parse_dialog(question: str) -> list[dict]:
     """«Пользователь: … Ассистент: …» → список сообщений; одиночный вопрос → одно сообщение."""
-    parts = TURN_RE.split(question.strip())
-    if len(parts) < 3:
-        return [{"role": "user", "content": question.strip()}]
+    question = question.strip()
+    parts = TURN_RE.split(question)
+    # Маркеры внутри одиночного вопроса не превращают произвольный текст в диалог.
+    if len(parts) < 3 or parts[0] or parts[1].casefold() not in {"пользователь", "user"}:
+        return [{"role": "user", "content": question}]
     messages = []
-    if parts[0].strip():
-        messages.append({"role": "user", "content": parts[0].strip()})
     for speaker, text in zip(parts[1::2], parts[2::2]):
         role = "assistant" if speaker.lower() in ("ассистент", "assistant") else "user"
         if text.strip():
             messages.append({"role": role, "content": text.strip()})
     if not messages or messages[-1]["role"] != "user":
-        messages.append({"role": "user", "content": question.strip()})
+        return [{"role": "user", "content": question}]
     return messages
 
 
@@ -754,12 +773,12 @@ SYSTEM_PROMPT = """Ты — юридический ассистент банка
 Перед ответом проверь:
 1. Какой именно документ, контрагент, дата события и вопрос. Различай одноимённые компании по номеру договора, названию и ИНН. Если от неясной детали зависит вывод, дай варианты или задай один конкретный уточняющий вопрос.
 2. Какая редакция действовала на дату события. Проверь даты вступления и условия применимости каждого допсоглашения. При отсутствии даты ориентируйся на текущую, если вопрос про действующее правило. Если доступна только более поздняя редакция закона, а норма после события изменилась, объясни, какой редакции не хватает. Пометка об изменении сама по себе не раскрывает прежнюю норму.
-3. Какие положения отвечают на каждый подвопрос. Учитывай исключения, пороги, предельные суммы, рабочие или календарные дни и момент начала срока. Договорное условие, требование закона и внутренний порядок согласования могут применяться одновременно. Излагай их раздельно, если они дают разные цифры или обязанности.
+3. Какие положения отвечают на каждый подвопрос. Учитывай исключения, пороги, предельные суммы, рабочие или календарные дни и момент начала срока. Если в вопросе важны одновременно договор, закон и внутренний регламент, раздели их требования. Для срока укажи событие, от которого он отсчитывается, и дай его определение из базы, если оно есть. Срок одной операции не применяй к другой без прямого основания в тексте.
 4. При расчёте укажи базу, ставку, срок и применимый предел, если они определены. Не подставляй отсутствующее значение. При ложной посылке прямо назови правильный факт и его источник.
-5. Если подтверждена только часть, дай её и точно назови недостающий документ, пункт или факт. Если оснований нет, объясни, чего нет в предоставленной базе и что нужно для ответа. Не отказывайся, если текст позволяет ответить. Отсутствие фрагмента не доказывает, что правила или обязанности вообще нет.
+5. Если подтверждена только часть, дай её и точно назови недостающий документ, пункт или факт. Если оснований нет, объясни, чего нет в предоставленной базе и что нужно для ответа. Не отказывайся, если текст позволяет ответить. Если имеющаяся норма лишь отсылает к другой статье, сообщи, что известно из отсылки. Без текста другой статьи не выводи из неё сроки, условия и обязанности. Отсутствие фрагмента не доказывает, что правила или обязанности вообще нет.
 6. В просьбе о нарушении закона или регламента откажись содействовать нарушению и назови законный порядок, если он есть в базе. По вопросу вне юридической тематики кратко обозначь границы ассистента.
 
-Начни с вывода. Затем кратко обоснуй его. У каждого существенного факта укажи документ и точный пункт, статью или часть, которые действительно его подтверждают. Для договора укажи номер и контрагента, для регламента — редакцию. Приведи ответ по-русски без заголовков и Markdown. Обычно достаточно 2–5 предложений. Если вопрос многочастный, ответь на все части.
+Начни с вывода. Затем кратко обоснуй его. У каждого существенного факта укажи документ и точный пункт, статью или часть, которые действительно его подтверждают. Для договора укажи номер и контрагента, для регламента — редакцию. Приведи ответ по-русски без заголовков и Markdown. Обычно достаточно 2–5 предложений. Если вопрос многочастный, ответь на все части. Добавляй только условия и исключения, которые меняют ответ на заданный вопрос. Не перечисляй посторонние законы, другие договоры или смежные процедуры. Если вопрос допускает «да» или «нет», начни с вердикта ровно по предложенному пользователем варианту. Затем поясни, на каких условиях возможен другой вариант.
 
 Вымышленные примеры ниже показывают только метод. Никогда не используй их документы, числа, даты или нормы как источник ответа.
 
@@ -768,7 +787,7 @@ SYSTEM_PROMPT = """Ты — юридический ассистент банка
 Источник в примере: договор № Л-8, п. 4.1 — уведомить поставщика за 3 рабочих дня; инструкция № 2, п. 5 — согласовать уведомление внутри компании. Вопрос: достаточно ли предупредить поставщика за 3 дня? Ответ: Поставщика нужно уведомить за 3 рабочих дня (договор № Л-8, п. 4.1). Отдельно требуется внутреннее согласование (инструкция № 2, п. 5).
 Источник в примере: договор № М-5, п. 3 — оплата в течение 12 рабочих дней после приёмки; условий об авансе в приложенных фрагментах нет. Вопрос: какой срок оплаты и размер аванса? Ответ: По договору № М-5 оплата производится в течение 12 рабочих дней после приёмки (п. 3). Размер аванса по предоставленным фрагментам установить нельзя."""
 
-CHECK_PROMPT = """Перепроверь предыдущий ответ на исходный вопрос по переданной базе. Сохрани ответ дословно, если он верен и полон. Иначе исправь только подтверждённые ошибки: пропущенный подвопрос, контрагента, применимость редакции или допсоглашения, дату, арифметику, оговорку, ошибочную ссылку или необоснованный отказ. При отсутствии основания назови конкретный пробел. Не добавляй сведения из истории, примеров или памяти. Верни только итоговый ответ со ссылками на применимые положения."""
+CHECK_PROMPT = """Перепроверь предыдущий ответ на исходный вопрос по переданной базе. Если ответ верен и полон, верни ровно СОХРАНИТЬ. Иначе исправь только подтверждённые ошибки: неверное «да» или «нет», пропущенный подвопрос, контрагента, применимость редакции или допсоглашения, дату, арифметику, оговорку, ошибочную ссылку или необоснованный отказ. Проверь «да» или «нет» именно для предложенного пользователем варианта. Сохрани подтверждённые условия, определения, основания расчёта и ссылки, которые нужны для ответа. Не переноси сроки с одной операции на другую. Убери детали вне вопроса и выводы из норм, на которые в базе есть только отсылка. При отсутствии основания назови конкретный пробел. Не добавляй сведения из истории, примеров или памяти. При исправлении верни полный ответ на все части вопроса со ссылками на применимые положения, без комментария о проверке."""
 
 
 def format_kb(company: list[Document], laws: list[Document], law_chunks: list[Chunk], company_chunks: list[Chunk] | None,
@@ -808,13 +827,16 @@ class Draft:
     messages: list[dict]
     text: str
     unknown: list[str]
+    evidence: str = ""
 
 
 class Assistant:
     def __init__(self, docs: list[Document]):
         self.company = [d for d in docs if d.kind == "company"]
         self.laws = [d for d in docs if d.kind == "law"]
-        self.law_retriever = Retriever([c for d in self.laws for c in chunk_document(d)])
+        law_chunks = [c for d in self.laws for c in chunk_document(d)]
+        self.law_retriever = Retriever(law_chunks)
+        self.law_chunks_by_position = {(c.doc.name, c.pos): c for c in law_chunks}
         company_size = sum(len(d.text) for d in self.company)
         self.company_retriever = (
             Retriever([c for d in self.company for c in chunk_document(d)]) if company_size > COMPANY_FULL_LIMIT else None
@@ -835,7 +857,9 @@ class Assistant:
         """Найденные фрагменты законов (до группировки по статьям): поиск + явные ссылки на статьи."""
         user_turns = [m["content"] for m in messages if m["role"] == "user"]
         query, context = user_turns[-1], " ".join(user_turns[-3:-1])
-        found = self.law_retriever.search(client, query, LAW_CANDIDATES, LAW_TOP_N, context)
+        pool_size = max(LAW_TOP_N, min(LAW_CANDIDATES, LAW_TOP_N * 2))
+        ranked = self.law_retriever.search(client, query, LAW_CANDIDATES, pool_size, context)
+        found = diversify_law_hits(ranked, LAW_TOP_N)
         hit_docs = {c.doc.name for c in found}
         provisions = set(QUESTION_PROVISION_RE.findall(query))
         forced: list[Chunk] = []
@@ -846,7 +870,24 @@ class Assistant:
         return list({(c.doc.name, c.pos): c for c in forced + found}.values())
 
     def context(self, client: httpx.Client | None, messages: list[dict]) -> str:
-        law_chunks = expand_law_chunks(self.search_laws(client, messages))
+        hits = self.search_laws(client, messages)
+        # Два соседних абзаца на статью помогают восстановить оговорку или заголовок пункта.
+        primary = expand_law_chunks(hits)
+        available = LAW_CONTEXT_CHARS - sum(len(c.text) for c in primary)
+        neighbors = []
+        covered = {(c.doc.name, c.pos) for c in hits}
+        visited = set()
+        for hit in hits:
+            if len(hit.doc.text) <= LAW_FULL_CHARS or hit.doc.name in visited:
+                continue
+            visited.add(hit.doc.name)
+            for pos in (hit.pos - 1, hit.pos + 1):
+                key = (hit.doc.name, pos)
+                neighbor = self.law_chunks_by_position.get(key)
+                if key not in covered and neighbor is not None and len(neighbor.text) <= available:
+                    neighbors.append(neighbor)
+                    available -= len(neighbor.text)
+        law_chunks = expand_law_chunks(hits + neighbors) if neighbors else primary
         company_chunks = None
         if self.company_retriever:
             user_turns = [m["content"] for m in messages if m["role"] == "user"]
@@ -889,11 +930,15 @@ class Assistant:
     def answer(self, client: httpx.Client, question: str) -> Draft:
         turns = parse_dialog(question)
         kb = self.context(client, turns)
-        final = {"role": "user", "content": f"{kb}\n\n---\nВопрос пользователя: {turns[-1]['content']}"}
+        history = "\n".join(f"{'Пользователь' if turn['role'] == 'user' else 'Ассистент'}: {turn['content']}"
+                            for turn in turns[:-1])
+        dialog = f"Предыдущие реплики (справочный контекст):\n{history}\n\n" if history else ""
+        final = {"role": "user", "content": f"{kb}\n\n---\n{dialog}Последний вопрос пользователя: {turns[-1]['content']}"}
         system = {"role": "system", "content": SYSTEM_PROMPT.format(today=TODAY)}
-        messages = [system, *turns[:-1], final]
+        messages = [system, final]
         text = self.chat(client, messages)
-        return Draft(turns[-1]["content"], messages, text, unknown_numbers(text, final["content"], turns[-1]["content"]))
+        current = turns[-1]["content"]
+        return Draft(current, messages, text, unknown_numbers(text, kb, current), kb)
 
     def review(self, client: httpx.Client, draft: Draft) -> str:
         hints = ""
@@ -902,8 +947,12 @@ class Assistant:
         messages = [*draft.messages, {"role": "assistant", "content": draft.text},
                     {"role": "user", "content": CHECK_PROMPT + hints}]
         verified = self.chat(client, messages, review=True)
-        context = draft.messages[-1]["content"]
-        if len(unknown_numbers(verified, context, draft.question)) > len(draft.unknown):
+        if verified.strip().rstrip(".").casefold() == "сохранить":
+            return draft.text
+        if (ANSWER_CITATION_RE.search(draft.text) and not ANSWER_CITATION_RE.search(verified)
+                and not REFUSAL_RE.search(verified)):
+            return draft.text
+        if len(unknown_numbers(verified, draft.evidence, draft.question)) > len(draft.unknown):
             return draft.text
         return verified
 
@@ -1032,10 +1081,9 @@ def main() -> None:
 
     save()
     if not timed_out and time_left() > REVIEW_FLOOR_SEC:
-        candidates = [(i, d) for i, d in sorted(drafts.items())
-                      if d.unknown or SELF_CHECK == "1"
-                      or (SELF_CHECK == "auto" and needs_review(d.question, d.text))]
-        candidates.sort(key=lambda item: not item[1].unknown)
+        candidates = [(i, d) for i, d in sorted(drafts.items()) if d.unknown or SELF_CHECK in {"1", "auto"}]
+        candidates.sort(key=lambda item: (not item[1].unknown,
+                                          not needs_review(item[1].question, item[1].text)))
         log(f"Кандидатов на перепроверку: {len(candidates)}")
         futures = [pool.submit(review_one, i, d) for i, d in candidates]
         revised = 0
