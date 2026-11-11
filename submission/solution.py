@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import datetime as dt
 import io
@@ -30,6 +31,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -774,7 +776,7 @@ SYSTEM_PROMPT = """Ты — юридический ассистент банка
 1. Какой именно документ, контрагент, дата события и вопрос. Различай одноимённые компании по номеру договора, названию и ИНН. Если от неясной детали зависит вывод, дай варианты или задай один конкретный уточняющий вопрос.
 2. Какая редакция действовала на дату события. Проверь даты вступления и условия применимости каждого допсоглашения. При отсутствии даты ориентируйся на текущую, если вопрос про действующее правило. Если доступна только более поздняя редакция закона, а норма после события изменилась, объясни, какой редакции не хватает. Пометка об изменении сама по себе не раскрывает прежнюю норму.
 3. Какие положения отвечают на каждый подвопрос. Учитывай исключения, пороги, предельные суммы, рабочие или календарные дни и момент начала срока. Если в вопросе важны одновременно договор, закон и внутренний регламент, раздели их требования. Для срока укажи событие, от которого он отсчитывается, и дай его определение из базы, если оно есть. Срок одной операции не применяй к другой без прямого основания в тексте.
-4. При расчёте укажи базу, ставку, срок и применимый предел, если они определены. Не подставляй отсутствующее значение. При ложной посылке прямо назови правильный факт и его источник.
+4. При расчёте укажи базу, ставку, срок и применимый предел, если они определены. Если считаешь сумму, покажи короткое числовое равенство и единицу измерения результата. Не подставляй отсутствующее значение. При ложной посылке прямо назови правильный факт и его источник.
 5. Если подтверждена только часть, дай её и точно назови недостающий документ, пункт или факт. Если оснований нет, объясни, чего нет в предоставленной базе и что нужно для ответа. Не отказывайся, если текст позволяет ответить. Если имеющаяся норма лишь отсылает к другой статье, сообщи, что известно из отсылки. Без текста другой статьи не выводи из неё сроки, условия и обязанности. Отсутствие фрагмента не доказывает, что правила или обязанности вообще нет.
 6. В просьбе о нарушении закона или регламента откажись содействовать нарушению и назови законный порядок, если он есть в базе. По вопросу вне юридической тематики кратко обозначь границы ассистента.
 
@@ -828,6 +830,7 @@ class Draft:
     text: str
     unknown: list[str]
     evidence: str = ""
+    arithmetic: tuple[str, ...] = ()
 
 
 class Assistant:
@@ -938,12 +941,15 @@ class Assistant:
         messages = [system, final]
         text = self.chat(client, messages)
         current = turns[-1]["content"]
-        return Draft(current, messages, text, unknown_numbers(text, kb, current), kb)
+        return Draft(current, messages, text, unknown_numbers(text, kb, current), kb, arithmetic_mismatches(text))
 
     def review(self, client: httpx.Client, draft: Draft) -> str:
         hints = ""
         if draft.unknown:
             hints = " Проверь номера, которых нет в материалах: " + ", ".join(draft.unknown) + "."
+        if draft.arithmetic:
+            hints += (" Проверка арифметики выявила несовпадения: " + "; ".join(draft.arithmetic)
+                      + ". Перепроверь расчёт по источнику. Результат операции не заменяет проверку базы, ставки и лимита.")
         messages = [*draft.messages, {"role": "assistant", "content": draft.text},
                     {"role": "user", "content": CHECK_PROMPT + hints}]
         verified = self.chat(client, messages, review=True)
@@ -952,9 +958,66 @@ class Assistant:
         if (ANSWER_CITATION_RE.search(draft.text) and not ANSWER_CITATION_RE.search(verified)
                 and not REFUSAL_RE.search(verified)):
             return draft.text
-        if len(unknown_numbers(verified, draft.evidence, draft.question)) > len(draft.unknown):
+        if (len(arithmetic_mismatches(verified)) > len(draft.arithmetic)
+                or len(unknown_numbers(verified, draft.evidence, draft.question)) > len(draft.unknown)):
             return draft.text
         return verified
+
+
+# Проверяем только явно записанные равенства с числами. Проценты — доли,
+# округление суммы до ближайшей копейки допустимо. Никакие выражения не исполняются.
+AMOUNT = r"(?:[0-9]{1,3}(?:[ \u00a0\u202f][0-9]{3})+|[0-9]+)(?:[,.][0-9]+)?"
+FACTOR = rf"{AMOUNT}[ \t]*%?"
+EQUATION_RE = re.compile(
+    rf"(?<![\w.,])(?P<left>{FACTOR}(?:[ \t]*[-+−×*÷/][ \t]*{FACTOR}){{1,6}})"
+    rf"[ \t]*=[ \t]*(?P<right>{AMOUNT})(?![0-9]|[,.][0-9]|[ \u00a0\u202f][0-9]|[ \t]*%)"
+)
+OPERATION = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+}
+
+
+def decimal_text(value: str) -> str:
+    return re.sub(r"[ \u00a0\u202f]", "", value).replace(",", ".")
+
+
+def arithmetic_mismatches(text: str) -> tuple[str, ...]:
+    mismatches = []
+    for match in EQUATION_RE.finditer(text):
+        if match.end() - match.start() > 120:
+            continue
+        # Пропускаем формулы, если регулярка захватила лишь часть выражения.
+        before = text[:match.start()].rstrip()
+        after = text[match.end():].lstrip()
+        if (before.endswith(("+", "-", "−", "×", "*", "÷", "/", "(", "="))
+                or after.startswith(("+", "-", "−", "×", "*", "÷", "/", "=", "%"))
+                or re.match(r"(?:тыс|млн|млрд|трлн)\b", after, re.I)):
+            continue
+        left = match["left"].strip()
+        expression = re.sub(rf"({AMOUNT})[ \t]*%", lambda m: f"({decimal_text(m[1])}/100)", left)
+        expression = decimal_text(expression).translate(str.maketrans("−×÷", "-*/"))
+        def calculate(node: ast.AST) -> Decimal:
+            if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
+                return Decimal(ast.get_source_segment(expression, node))
+            if isinstance(node, ast.BinOp) and type(node.op) in OPERATION:
+                return OPERATION[type(node.op)](calculate(node.left), calculate(node.right))
+            raise ValueError("Неподдерживаемая операция")
+
+        try:
+            with localcontext() as context:
+                context.prec = 32
+                actual = calculate(ast.parse(expression, mode="eval").body)
+                shown = Decimal(decimal_text(match["right"]))
+                if abs(actual - shown) > Decimal("0.01"):
+                    mismatches.append(f"{left} = {actual.quantize(Decimal('0.01')):f}, а в черновике {match['right']}")
+        except (ArithmeticError, InvalidOperation, SyntaxError, ValueError):
+            continue
+        if len(mismatches) == 3:
+            break
+    return tuple(mismatches)
 
 
 COMPLEX_QUESTION_RE = re.compile(
@@ -1081,8 +1144,8 @@ def main() -> None:
 
     save()
     if not timed_out and time_left() > REVIEW_FLOOR_SEC:
-        candidates = [(i, d) for i, d in sorted(drafts.items()) if d.unknown or SELF_CHECK in {"1", "auto"}]
-        candidates.sort(key=lambda item: (not item[1].unknown,
+        candidates = [(i, d) for i, d in sorted(drafts.items()) if d.unknown or d.arithmetic or SELF_CHECK in {"1", "auto"}]
+        candidates.sort(key=lambda item: (not (item[1].unknown or item[1].arithmetic),
                                           not needs_review(item[1].question, item[1].text)))
         log(f"Кандидатов на перепроверку: {len(candidates)}")
         futures = [pool.submit(review_one, i, d) for i, d in candidates]

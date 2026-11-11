@@ -243,3 +243,31 @@ def test_review_marker_keeps_original(monkeypatch):
     draft = s.Draft("Вопрос", [], "Исходный ответ.", [])
     monkeypatch.setattr(a, "chat", lambda *args, **kwargs: "СОХРАНИТЬ.")
     assert a.review(None, draft) == draft.text
+
+
+def test_arithmetic_checks_decimal_percent_and_grouped_numbers():
+    assert s.arithmetic_mismatches("500 000 × 0,2% × 40 = 40 000 руб.") == ()
+    assert s.arithmetic_mismatches("500 000 × 0,2% × 40 = 4 000 руб.") == (
+        "500 000 × 0,2% × 40 = 40000.00, а в черновике 4 000",
+    )
+    assert s.arithmetic_mismatches("450 000 + 31 500 = 481 500 руб.") == ()
+    assert s.arithmetic_mismatches("В расчёте 100 × 5 = 400.")
+    assert s.arithmetic_mismatches("100 - 40 = 60; 5 ÷ 0 = 0.") == ()
+
+
+def test_arithmetic_ignores_unsupported_or_partial_expressions():
+    for value in ("(100 + 20) × 5 = 600", "25 × 5 = 1000%",
+                  "400/3 = 133,33 руб.", "1 × 2 = 2 × 1", "2 ** 3 = 8", "1000 × 2 = 2 тыс. руб."):
+        assert s.arithmetic_mismatches(value) == (), value
+
+
+def test_review_receives_calculation_mismatch(monkeypatch):
+    assistant = s.Assistant([])
+    draft = s.Draft("Сколько?", [{"role": "user", "content": "Данные"}], "10 × 5 = 40 руб.",
+                    [], "", s.arithmetic_mismatches("10 × 5 = 40 руб."))
+    def fix(client, messages, review=False):
+        assert review
+        assert "10 × 5 = 50.00" in messages[-1]["content"]
+        return "10 × 5 = 50 руб."
+    monkeypatch.setattr(assistant, "chat", fix)
+    assert assistant.review(None, draft) == "10 × 5 = 50 руб."
