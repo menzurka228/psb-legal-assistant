@@ -23,25 +23,32 @@ func main() {
 	}
 	log.Printf("база знаний (%s): документов компании %d (разделов %d), законов %d (фрагментов %d)",
 		cfg.KBDir, len(base.Company), len(base.CompanyChunks), len(base.Laws), len(base.LawChunks))
-	if cfg.LLMBaseURL == "" || cfg.LLMAPIKey == "" {
-		log.Printf("ВНИМАНИЕ: LLM_BASE_URL или LLM_API_KEY не заданы — ответы модели будут недоступны")
+	var answerer api.Answerer
+	if cfg.DemoMode {
+		log.Print("деморежим: локальный поиск по базе")
+		answerer = assistant.NewDemo(base)
+	} else {
+		if cfg.LLMBaseURL == "" {
+			log.Printf("ВНИМАНИЕ: LLM_BASE_URL не задан — ответы модели будут недоступны")
+		}
+
+		client := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMTemperature, cfg.LLMMaxTokens, cfg.LLMTimeout)
+		client.EmbedKey, client.EmbedModel = cfg.EmbedKey, cfg.EmbedModel
+		client.RerankKey, client.RerankModel = cfg.RerankKey, cfg.RerankModel
+		var emb kb.Embedder
+		if cfg.UseEmbeddings && cfg.LLMBaseURL != "" {
+			emb = client
+		}
+
+		a := assistant.New(base, client, emb, cfg.Today, cfg.CompanyFullLimit)
+		a.LawCandidates, a.LawTopN, a.SelfCheck = cfg.LawCandidates, cfg.LawTopN, cfg.SelfCheck
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		a.Prepare(ctx)
+		cancel()
+		answerer = a
 	}
 
-	client := llm.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMTemperature, cfg.LLMMaxTokens, cfg.LLMTimeout)
-	client.EmbedKey, client.EmbedModel = cfg.EmbedKey, cfg.EmbedModel
-	client.RerankKey, client.RerankModel = cfg.RerankKey, cfg.RerankModel
-	var emb kb.Embedder
-	if cfg.UseEmbeddings && cfg.LLMBaseURL != "" {
-		emb = client
-	}
-
-	a := assistant.New(base, client, emb, cfg.Today, cfg.CompanyFullLimit)
-	a.LawCandidates, a.LawTopN, a.SelfCheck = cfg.LawCandidates, cfg.LawTopN, cfg.SelfCheck
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	a.Prepare(ctx)
-	cancel()
-
-	srv := &api.Server{KB: base, Assistant: a, StaticDir: cfg.StaticDir}
+	srv := &api.Server{KB: base, Assistant: answerer, StaticDir: cfg.StaticDir}
 	httpSrv := &http.Server{Addr: cfg.Addr, Handler: srv.Routes(), ReadHeaderTimeout: 10 * time.Second}
 	log.Printf("слушаю %s", cfg.Addr)
 	log.Fatal(httpSrv.ListenAndServe())

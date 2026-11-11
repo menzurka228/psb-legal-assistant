@@ -11,6 +11,7 @@ type Config struct {
 	Addr      string
 	KBDir     string
 	StaticDir string
+	DemoMode  bool
 
 	LLMBaseURL     string
 	LLMAPIKey      string
@@ -38,6 +39,7 @@ func Load() Config {
 		Addr:           env("ADDR", ":8000"),
 		KBDir:          env("KB_DIR", "data/kb"),
 		StaticDir:      env("STATIC_DIR", "frontend/dist"),
+		DemoMode:       env("DEMO_MODE", "0") == "1",
 		LLMBaseURL:     first(os.Getenv("LLM_BASE_URL"), os.Getenv("BASE_URL"), os.Getenv("OPENAI_BASE_URL")),
 		LLMAPIKey:      key,
 		LLMModel:       env("LLM_MODEL", "deepseek/deepseek-v4.1-flash"),

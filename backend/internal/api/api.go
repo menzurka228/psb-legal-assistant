@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -14,9 +15,13 @@ import (
 	"github.com/menzurka228/psb-legal-assistant/backend/internal/llm"
 )
 
+type Answerer interface {
+	Answer(context.Context, string, []llm.Message) (assistant.Answer, error)
+}
+
 type Server struct {
 	KB        *kb.KnowledgeBase
-	Assistant *assistant.Assistant
+	Assistant Answerer
 	StaticDir string
 }
 

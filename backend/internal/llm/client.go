@@ -155,6 +155,9 @@ func retryDelay(err error, attempt int) (time.Duration, bool) {
 
 // Chat — генерация с повторами (до 5 попыток).
 func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
+	if c.BaseURL == "" {
+		return "", errors.New("модель пока не подключена. Задайте LLM_BASE_URL и LLM_MODEL на сервере")
+	}
 	payload := map[string]any{"model": c.Model, "messages": messages, "temperature": c.Temperature}
 	if c.MaxTokens > 0 {
 		payload["max_tokens"] = c.MaxTokens
