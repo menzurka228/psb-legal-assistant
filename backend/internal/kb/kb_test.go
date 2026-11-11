@@ -45,7 +45,7 @@ func TestSearchWithAbbreviation(t *testing.T) {
 		"законы__НК_ст164.txt": "1. Ставка 0 процентов при экспорте.\n\n3. Налогообложение налогом на добавленную стоимость производится по ставке 22 процента.",
 		"законы__ТК_ст70.txt":  "Срок испытания не может превышать трех месяцев.",
 	})
-	hits := NewRetriever(base.LawChunks, nil).Search(nil, "какая ставка НДС", 10, 3)
+	hits := NewRetriever(base.LawChunks, nil).Search(nil, "какая ставка НДС", "", 10, 3)
 	if len(hits) == 0 || hits[0].Doc != "законы__НК_ст164.txt" {
 		t.Fatalf("ожидали НК ст.164 первой: %+v", hits)
 	}

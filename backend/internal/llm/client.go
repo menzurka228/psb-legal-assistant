@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -138,14 +139,28 @@ func (c *Client) post(ctx context.Context, path, key string, payload any, out an
 	return nil
 }
 
-// Chat — генерация с тремя попытками.
+// retryDelay: при 429 — растущая пауза, при 5xx/408/409/сетевой ошибке — короткая, при прочих 4xx — без повтора.
+func retryDelay(err error, attempt int) (time.Duration, bool) {
+	var se *statusError
+	if errors.As(err, &se) {
+		switch {
+		case se.code == 429:
+			return min(time.Duration(2<<attempt)*time.Second, 30*time.Second), true
+		case se.code < 500 && se.code != 408 && se.code != 409:
+			return 0, false
+		}
+	}
+	return time.Duration(attempt+1) * 1500 * time.Millisecond, true
+}
+
+// Chat — генерация с повторами (до 5 попыток).
 func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 	payload := map[string]any{"model": c.Model, "messages": messages, "temperature": c.Temperature}
 	if c.MaxTokens > 0 {
 		payload["max_tokens"] = c.MaxTokens
 	}
 	var last error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		var out struct {
 			Choices []struct {
 				Message Message `json:"message"`
@@ -159,10 +174,14 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (string, error) {
 			err = fmt.Errorf("модель вернула пустой ответ")
 		}
 		last = err
+		wait, retry := retryDelay(err, attempt)
+		if !retry {
+			break // ошибка запроса, а не перегрузка — повтор не поможет
+		}
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 1500 * time.Millisecond):
+		case <-time.After(wait):
 		}
 	}
 	return "", fmt.Errorf("LLM недоступна: %w", last)

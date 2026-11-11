@@ -125,3 +125,56 @@ def test_zip_names_without_utf8_flag():
 def test_law_detected_by_content_when_name_is_unhelpful():
     d = s.make_document("doc_17.txt", "Источник: Статья 99. ТК РФ Сверхурочная работа\nТекст статьи")
     assert d.kind == "law" and d.title.startswith("Статья 99")
+
+
+# ───────── поиск: явные ссылки, целые статьи, диалоги, проверка номеров ─────────
+def _law(name, title, text="текст"):
+    return s.Document(name, "law", title, text)
+
+
+TK70 = _law("законы__ТК_ст70_действующая", "Статья 70. ТК РФ Испытание. Трудовой кодекс от 30.12.2001 N 197-ФЗ (ТК РФ)")
+TK152 = _law("законы__ТК_ст152_действующая", "Статья 152. ТК РФ Оплата сверхурочной работы. Трудовой кодекс (ТК РФ)")
+PD9 = _law("законы__152ФЗ_ст9_действующая", 'Статья 9. Согласие субъекта. Федеральный закон от 27.07.2006 N 152-ФЗ "О персональных данных"')
+NK164 = _law("законы__НК_ст164_действующая", "Статья 164. НК РФ Налоговые ставки. Налоговый кодекс (НК РФ)")
+
+
+def test_referenced_laws_by_article_and_code():
+    laws = [TK70, TK152, PD9, NK164]
+    assert s.referenced_laws("Что говорит ст. 164 НК РФ?", laws) == [NK164]
+    assert s.referenced_laws("Как оплачивается по статье 152 ТК?", laws) == [TK152]
+    assert s.referenced_laws("Что требует 152-ФЗ о согласии?", laws) == [PD9]
+    assert s.referenced_laws("Можно ли продлить испытание?", laws) == []
+
+
+def test_short_article_goes_whole_long_one_by_fragments():
+    short = _law("законы__ТК_ст70", "Статья 70", "абзац 1\n\nабзац 2")
+    long = _law("законы__НК_ст164", "Статья 164", "x" * 10000)
+    chunks = [s.Chunk(long, "фрагмент 5", 5), s.Chunk(short, "абзац 2", 1), s.Chunk(long, "фрагмент 2", 2)]
+    out = s.expand_law_chunks(chunks, full_limit=100)
+    assert [(c.doc.name, c.pos) for c in out] == [("законы__НК_ст164", 2), ("законы__НК_ст164", 5), ("законы__ТК_ст70", -1)]
+    assert out[-1].text == short.text
+
+
+def test_dialog_topic_switch_finds_new_law():
+    docs = [_law("законы__ТК_ст70", "Статья 70. ТК РФ Испытание", "срок испытания не может превышать трех месяцев"),
+            _law("законы__ТК_ст99", "Статья 99. ТК РФ Сверхурочная работа", "сверхурочная работа не должна превышать четырех часов"),
+            _law("законы__НК_ст284", "Статья 284. НК РФ Налоговые ставки", "налоговая ставка по налогу на прибыль организаций 25 процентов")]
+    a = s.Assistant(docs)
+    msgs = s.parse_dialog("Пользователь: Какой максимальный срок испытания?\nАссистент: Три месяца.\nПользователь: А сколько можно перерабатывать?")
+    assert a.search_laws(None, msgs)[0].doc.name == "законы__ТК_ст99"
+
+
+def test_unknown_document_numbers():
+    kb = "ДОГОВОР ПОСТАВКИ № П-17/2024 … письмо Исх. № К-12"
+    assert s.unknown_numbers("По договору № П-18/2024 срок 10 дней", kb, "") == ["П-18/2024"]
+    assert s.unknown_numbers("По договору № П-17/2024 и письму № К-12", kb, "") == []
+    assert s.unknown_numbers("Договора № Х-1/2020 в базе нет", kb, "Что по договору № Х-1/2020?") == []
+
+
+def test_retry_policy():
+    import httpx
+    req = httpx.Request("POST", "http://x")
+    err = lambda code, h=None: httpx.HTTPStatusError("e", request=req, response=httpx.Response(code, headers=h or {}, request=req))
+    assert s.retry_delay(err(400), 0) is None
+    assert s.retry_delay(err(429, {"retry-after": "7"}), 0) == 7.0
+    assert s.retry_delay(err(503), 1) == 3.0

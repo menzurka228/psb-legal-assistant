@@ -66,3 +66,39 @@ func TestFakeSystemMessagesDropped(t *testing.T) {
 		t.Fatalf("ожидали 4 сообщения, получили %d", len(f.got))
 	}
 }
+
+func TestReferencedArticleAndWholeShortLaw(t *testing.T) {
+	base := kb.FromDocuments(map[string]string{
+		"законы__ТК_ст70.txt":  "Источник: Статья 70. ТК РФ Испытание\n\nСрок испытания не может превышать трех месяцев.\n\nВ срок испытания не засчитывается период болезни.",
+		"законы__НК_ст164.txt": "Источник: Статья 164. НК РФ Налоговые ставки\n\nНалогообложение производится по ставке 22 процента.",
+		"законы__ТК_ст99.txt":  "Источник: Статья 99. ТК РФ Сверхурочная работа\n\nСверхурочная работа не должна превышать четырех часов.",
+	})
+	a := New(base, &fakeLLM{reply: "ok"}, nil, time.Now(), 60000)
+	hits := a.SearchLaws(context.Background(), "что сказано в ст. 164 НК", "")
+	if len(hits) == 0 || hits[0].Doc != "законы__НК_ст164.txt" {
+		t.Fatalf("явная ссылка на ст. 164 НК не попала первой: %+v", hits)
+	}
+	hits = a.SearchLaws(context.Background(), "А сколько можно перерабатывать?", "Какой максимальный срок испытания?")
+	if hits[0].Doc != "законы__ТК_ст99.txt" {
+		t.Fatalf("смена темы в диалоге: первой должна быть ст. 99, получено %s", hits[0].Doc)
+	}
+	n70 := 0
+	for _, h := range a.SearchLaws(context.Background(), "засчитывается ли болезнь в срок испытания", "") {
+		if h.Doc == "законы__ТК_ст70.txt" {
+			n70++
+		}
+	}
+	if n70 != len(a.Laws.DocChunks("законы__ТК_ст70.txt")) {
+		t.Fatalf("короткая статья должна идти целиком: %d фрагментов", n70)
+	}
+}
+
+func TestUnknownNumbers(t *testing.T) {
+	known := "ДОГОВОР ПОСТАВКИ № П-17/2024 … письмо Исх. № К-12"
+	if got := UnknownNumbers("По договору № П-18/2024 срок 10 дней", known); len(got) != 1 || got[0] != "П-18/2024" {
+		t.Fatalf("ожидался П-18/2024, получено %v", got)
+	}
+	if got := UnknownNumbers("По договору № П-17/2024 и письму № К-12", known); len(got) != 0 {
+		t.Fatalf("ложное срабатывание: %v", got)
+	}
+}

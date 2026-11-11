@@ -41,6 +41,7 @@ type Chunk struct {
 	Kind     string `json:"kind"`
 	Title    string `json:"title"` // заголовок фрагмента
 	Text     string `json:"text"`
+	Pos      int    `json:"-"` // порядковый номер фрагмента в документе
 }
 
 // Hit — найденный фрагмент с оценкой.
@@ -267,7 +268,7 @@ func ChunkLaw(d *Document, maxLen int) []Chunk {
 	buf := ""
 	add := func(text string) {
 		first := strings.SplitN(text, "\n", 2)[0]
-		chunks = append(chunks, Chunk{ID: fmt.Sprintf("%s#%d", d.Name, len(chunks)), Doc: d.Name, DocTitle: d.Title, Kind: d.Kind, Title: Truncate(first, 90), Text: text})
+		chunks = append(chunks, Chunk{ID: fmt.Sprintf("%s#%d", d.Name, len(chunks)), Doc: d.Name, DocTitle: d.Title, Kind: d.Kind, Title: Truncate(first, 90), Text: text, Pos: len(chunks)})
 	}
 	for _, p := range paras {
 		if buf != "" && runeLen(buf)+runeLen(p) > maxLen {
@@ -329,7 +330,14 @@ var abbreviations = map[string]string{
 	"есхн": "единый сельскохозяйственный налог",
 }
 
-// ExpandQuery добавляет расшифровки аббревиатур.
+// Бытовые слова из вопросов ↔ термины законов (по началу слова); как SYNONYMS в solution.py.
+var synonyms = [][2]string{
+	{"штраф", "налоговые санкции штраф"}, {"переработ", "сверхурочная работа"}, {"перерабатыв", "сверхурочная работа"},
+	{"испытательн", "испытание"}, {"прибыл", "налог на прибыль организаций"}, {"зарплат", "оплата труда"},
+	{"сезонн", "сезонные работы срочный трудовой договор"}, {"отозва", "отзыв согласия"}, {"утечк", "персональных данных нарушение"},
+}
+
+// ExpandQuery добавляет расшифровки аббревиатур и юридические термины для бытовых слов.
 func ExpandQuery(q string) string {
 	words := map[string]bool{}
 	for _, w := range rawWords(q) {
@@ -339,6 +347,14 @@ func ExpandQuery(q string) string {
 	for abbr, full := range abbreviations {
 		if words[abbr] {
 			extra = append(extra, full)
+		}
+	}
+	for _, s := range synonyms {
+		for w := range words {
+			if strings.HasPrefix(w, s[0]) {
+				extra = append(extra, s[1])
+				break
+			}
 		}
 	}
 	return strings.Join(extra, " ")

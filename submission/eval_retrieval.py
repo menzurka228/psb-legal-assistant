@@ -34,7 +34,6 @@ def main() -> None:
     ap.add_argument("--dataset", type=Path, default=ROOT / "data/eval/dataset.csv")
     ap.add_argument("--kb", type=Path, default=ROOT / "data/kb")
     ap.add_argument("--k", type=int, nargs="+", default=[3, 5, 8])
-    ap.add_argument("--candidates", type=int, default=s.LAW_CANDIDATES)
     ap.add_argument("--api", action="store_true", help="использовать эмбеддинги и реранкер через API")
     ap.add_argument("--report", type=Path, default=ROOT / "submission/retrieval_report.csv")
     args = ap.parse_args()
@@ -53,8 +52,7 @@ def main() -> None:
         if not expected:
             continue
         msgs = s.parse_dialog(r["question"])
-        query = " ".join(m["content"] for m in msgs if m["role"] == "user")
-        found = [c.doc.name for c in retriever.search(client, query, args.candidates, max_k)]
+        found = [c.doc.name for c in assistant.search_laws(client, msgs)]
         first = next((i + 1 for i, d in enumerate(found) if d in expected), None)
         res = {"id": r["id"], "category": r["category"], "question": r["question"][:90],
                "expected": "; ".join(sorted(expected)), "found_top": "; ".join(dict.fromkeys(found[:5])),

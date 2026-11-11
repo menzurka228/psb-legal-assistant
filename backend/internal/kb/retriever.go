@@ -4,7 +4,9 @@ import (
 	"context"
 	"log"
 	"math"
+	"regexp"
 	"sort"
+	"strings"
 )
 
 // Embedder — эмбеддинги и реранкер (API платформы: bge-m3 и реранкер). Может быть nil — тогда только BM25.
@@ -48,25 +50,37 @@ func (r *Retriever) PrepareEmbeddings(ctx context.Context) {
 	log.Printf("эмбеддинги фрагментов готовы: %d", len(all))
 }
 
-func (r *Retriever) Search(ctx context.Context, query string, candidates, topN int) []Hit {
+// Search ищет по текущему вопросу query; dialog — предыдущие реплики пользователя (вес вдвое меньше),
+// чтобы уточняющий вопрос не терял тему, а смена темы не тонула в старой.
+func (r *Retriever) Search(ctx context.Context, query, dialog string, candidates, topN int) []Hit {
 	if len(r.Chunks) == 0 {
 		return nil
 	}
-	bm := r.bm25.Scores(ExpandQuery(query))
+	queries := []string{query}
+	weights := []float64{1}
+	if dialog != "" {
+		queries = append(queries, dialog+" "+query)
+		weights = append(weights, 0.5)
+	}
 	rrf := map[int]float64{}
-	for rank, i := range argsort(bm) {
-		if bm[i] > 0 {
-			rrf[i] += 1 / float64(60+rank)
+	for qi, q := range queries {
+		bm := r.bm25.Scores(ExpandQuery(q))
+		for rank, i := range argsort(bm)[:min(2*candidates, len(bm))] {
+			if bm[i] > 0 {
+				rrf[i] += weights[qi] / float64(60+rank)
+			}
 		}
 	}
 	if r.vectors != nil && r.emb != nil {
-		if q, err := r.emb.Embed(ctx, []string{query}); err == nil && len(q) == 1 {
-			sims := make([]float64, len(r.vectors))
-			for i, v := range r.vectors {
-				sims[i] = dot(q[0], v)
-			}
-			for rank, i := range argsort(sims)[:min(candidates, len(sims))] {
-				rrf[i] += 1 / float64(60+rank)
+		if qv, err := r.emb.Embed(ctx, queries); err == nil && len(qv) == len(queries) {
+			for qi := range qv {
+				sims := make([]float64, len(r.vectors))
+				for i, v := range r.vectors {
+					sims[i] = dot(qv[qi], v)
+				}
+				for rank, i := range argsort(sims)[:min(candidates, len(sims))] {
+					rrf[i] += weights[qi] / float64(60+rank)
+				}
 			}
 		} else if err != nil {
 			log.Printf("эмбеддинг запроса не получен: %v", err)
@@ -87,7 +101,11 @@ func (r *Retriever) Search(ctx context.Context, query string, candidates, topN i
 		for j, i := range pool {
 			docs[j] = r.texts[i]
 		}
-		if order, err := r.emb.Rerank(ctx, query, docs, topN); err == nil && len(order) > 0 {
+		rq := query
+		if dialog != "" {
+			rq = query + "\nКонтекст диалога: " + dialog
+		}
+		if order, err := r.emb.Rerank(ctx, rq, docs, topN); err == nil && len(order) > 0 {
 			var out []Hit
 			for _, j := range order {
 				if j >= 0 && j < len(pool) && len(out) < topN {
@@ -102,6 +120,90 @@ func (r *Retriever) Search(ctx context.Context, query string, candidates, topN i
 	var out []Hit
 	for _, i := range pool[:min(topN, len(pool))] {
 		out = append(out, hit(i))
+	}
+	return out
+}
+
+// BestInDoc — лучшие по BM25 фрагменты конкретного документа (для явных ссылок «ст. 164 НК»).
+func (r *Retriever) BestInDoc(query, doc string, n int) []Hit {
+	scores := r.bm25.Scores(ExpandQuery(query))
+	var out []Hit
+	for _, i := range argsort(scores) {
+		if r.Chunks[i].Doc == doc && len(out) < n {
+			out = append(out, Hit{Chunk: r.Chunks[i], Score: scores[i]})
+		}
+	}
+	return out
+}
+
+// DocChunks — все фрагменты документа в порядке текста.
+func (r *Retriever) DocChunks(doc string) []Hit {
+	var out []Hit
+	for _, c := range r.Chunks {
+		if c.Doc == doc {
+			out = append(out, Hit{Chunk: c})
+		}
+	}
+	return out
+}
+
+var (
+	artRe      = regexp.MustCompile(`(?i)(?:^|[^\pL])(?:ст\.?|стать\pL*)\s*(\d+(?:\.\d+)?)`)
+	codeRe     = regexp.MustCompile(`(?i)(?:^|[^\pL])(тк|нк|коап|гк)(?:[^\pL]|$)|(\d+)\s*-?\s*фз(?:[^\pL]|$)`)
+	titleArtRe = regexp.MustCompile(`Статья\s+(\d+(?:\.\d+)?)\.`)
+	titleFZRe  = regexp.MustCompile(`N\s*(\d+)-ФЗ`)
+	titleCode  = regexp.MustCompile(`(ТК|НК|КоАП|ГК)\s+РФ`)
+)
+
+func lawKeys(d *Document) (string, map[string]bool) {
+	codes := map[string]bool{}
+	for _, m := range titleFZRe.FindAllStringSubmatch(d.Title, -1) {
+		codes[m[1]+"фз"] = true
+	}
+	for _, m := range titleCode.FindAllStringSubmatch(d.Title, -1) {
+		codes[strings.ToLower(m[1])] = true
+	}
+	stem := d.Name
+	if i := strings.Index(stem, "__"); i >= 0 {
+		stem = stem[i+2:]
+	}
+	stem = strings.SplitN(stem, "_ст", 2)[0]
+	codes[strings.ToLower(strings.ReplaceAll(stem, "-", ""))] = true
+	art := ""
+	if m := titleArtRe.FindStringSubmatch(d.Title); m != nil {
+		art = m[1]
+	}
+	return art, codes
+}
+
+// ReferencedLaws — статьи, на которые вопрос ссылается явно: «ст. 164 НК», «статья 70 ТК РФ», «152-ФЗ».
+func ReferencedLaws(question string, laws []*Document) []*Document {
+	arts := map[string]bool{}
+	for _, m := range artRe.FindAllStringSubmatch(question, -1) {
+		arts[m[1]] = true
+	}
+	codes := map[string]bool{}
+	for _, m := range codeRe.FindAllStringSubmatch(question, -1) {
+		if m[1] != "" {
+			codes[strings.ToLower(m[1])] = true
+		} else {
+			codes[m[2]+"фз"] = true
+		}
+	}
+	var out []*Document
+	for _, d := range laws {
+		art, dc := lawKeys(d)
+		common := false
+		for c := range codes {
+			common = common || dc[c]
+		}
+		if len(arts) > 0 {
+			if arts[art] && (len(codes) == 0 || common) {
+				out = append(out, d)
+			}
+		} else if common && !dc["тк"] && !dc["нк"] && !dc["коап"] && !dc["гк"] {
+			out = append(out, d) // «по 152-ФЗ» без номера статьи — отдельный закон, а не кодекс
+		}
 	}
 	return out
 }
